@@ -67,6 +67,11 @@
 #include "slic3r/GUI/MsgDialog.hpp"
 #include <memory>
 #include "slic3r/GUI/Jobs/UpgradeNetworkJob.hpp"
+#include "slic3r/GUI/ActionRegistry.hpp"
+#include "slic3r/GUI/ConfigWizard.hpp"
+#include "slic3r/GUI/HttpServer.hpp"
+#include "slic3r/GUI/ImGuiWrapper.hpp"
+#include "slic3r/Utils/PrintHost.hpp"
 #include "slic3r/GUI/Jobs/SendJob.hpp"
 #include "slic3r/GUI/Printer/PrinterFileSystem.h"
 #include <miniz.h>
@@ -1253,10 +1258,13 @@ GUI_App::GUI_App()
     //, m_app_mode(mode)
     , m_app_mode(EAppMode::Editor)
     , m_em_unit(10)
+    , m_opengl_mgr(std::make_unique<OpenGLManager>())
     , m_imgui(new ImGuiWrapper())
 	, m_removable_drive_manager(std::make_unique<RemovableDriveManager>())
     , m_downloader(std::make_unique<Downloader>())
 	, m_other_instance_message_handler(std::make_unique<OtherInstanceMessageHandler>())
+    , m_http_server(std::make_unique<HttpServer>())
+    , m_action_registry(std::make_unique<ActionRegistry>())
 {
 	//app config initializes early becasuse it is used in instance checking in OrcaSlicer.cpp
     this->init_app_config();
@@ -1270,6 +1278,12 @@ GUI_App::GUI_App()
 
     reset_to_active();
 }
+
+GLShaderProgram* GUI_App::get_shader(const std::string& shader_name) { return m_opengl_mgr->get_shader(shader_name); }
+GLShaderProgram* GUI_App::get_current_shader() { return m_opengl_mgr->get_current_shader(); }
+
+bool GUI_App::is_gl_version_greater_or_equal_to(unsigned int major, unsigned int minor) const { return m_opengl_mgr->get_gl_info().is_version_greater_or_equal_to(major, minor); }
+bool GUI_App::is_glsl_version_greater_or_equal_to(unsigned int major, unsigned int minor) const { return m_opengl_mgr->get_gl_info().is_glsl_version_greater_or_equal_to(major, minor); }
 
 void GUI_App::shutdown()
 {
@@ -2619,19 +2633,19 @@ std::string GUI_App::get_gl_info(bool for_github)
 
 wxGLContext* GUI_App::init_glcontext(wxGLCanvas& canvas)
 {
-    return m_opengl_mgr.init_glcontext(canvas, init_params != nullptr ? init_params->opengl_version : std::make_pair(0, 0),
+    return m_opengl_mgr->init_glcontext(canvas, init_params != nullptr ? init_params->opengl_version : std::make_pair(0, 0),
         init_params != nullptr ? init_params->opengl_compatibility_profile : false, init_params != nullptr ? init_params->opengl_debug : false);
 }
 
 bool GUI_App::init_opengl()
 {
 #ifdef __linux__
-    bool status = m_opengl_mgr.init_gl();
+    bool status = m_opengl_mgr->init_gl();
     if (status)
         m_opengl_initialized = true;
     return status;
 #else
-    return m_opengl_mgr.init_gl();
+    return m_opengl_mgr->init_gl();
 #endif
 }
 
@@ -3602,7 +3616,7 @@ bool GUI_App::on_init_inner()
     init_plugin_gui_wiring();
 
     // Subscribe to the plugin loader and enumerate current actions (UI thread, once).
-    m_action_registry.init();
+    m_action_registry->init();
 
     for (const std::string& plugin_key : plugin_mgr.get_enabled_plugin_keys()) {
         if (!plugin_mgr.is_plugin_loaded(plugin_key)) {
@@ -8317,12 +8331,12 @@ void GUI_App::on_stealth_mode_enter()
 
 void GUI_App::start_http_server(const std::string& provider)
 {
-    m_http_server.set_request_handler([provider](const std::string& url) {
+    m_http_server->set_request_handler([provider](const std::string& url) {
         return HttpServer::auth_handle_request(url, provider);
     });
 
-    if (!m_http_server.is_started())
-        m_http_server.start();
+    if (!m_http_server->is_started())
+        m_http_server->start();
 }
 
 void GUI_App::start_http_server(int port, const std::string& provider)
@@ -8332,24 +8346,24 @@ void GUI_App::start_http_server(int port, const std::string& provider)
         return;
     }
 
-    m_http_server.set_request_handler([provider](const std::string& url) {
+    m_http_server->set_request_handler([provider](const std::string& url) {
         return HttpServer::auth_handle_request(url, provider);
     });
 
-    if (m_http_server.is_started()) {
-        if (m_http_server.get_port() == static_cast<boost::asio::ip::port_type>(port)) {
+    if (m_http_server->is_started()) {
+        if (m_http_server->get_port() == static_cast<boost::asio::ip::port_type>(port)) {
             return;
         }
-        m_http_server.stop();
+        m_http_server->stop();
     }
 
-    m_http_server.set_port(static_cast<boost::asio::ip::port_type>(port));
-    m_http_server.start();
+    m_http_server->set_port(static_cast<boost::asio::ip::port_type>(port));
+    m_http_server->start();
 }
 
 void GUI_App::stop_http_server()
 {
-    m_http_server.stop();
+    m_http_server->stop();
 }
 
 #ifdef __linux__
@@ -9125,7 +9139,7 @@ void GUI_App::open_preferences(PreferencesTab tab, const std::string& highlight_
         }
         // Built-in Speed Dial command titles are copied from the catalog at init and don't follow a
         // live locale switch; rebuild them in the new language before the GUI (and palette) rebuilds.
-        m_action_registry.relocalize_builtins();
+        m_action_registry->relocalize_builtins();
     }
 
     if (need_recreate_gui)
